@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Launch Ore",
+            "type":"cppdbg",
+            "request": "launch",
+            "program": "${workspaceRoot}/build/Debug/Ore",
+            "preLaunchTask": "Ore: Debug Build",
+            "externalConsole": true,
+            "cwd": "${workspaceFolder}/build/Debug",
+            "args": [
+                "--wasm",
+                "-s",
+                "${workspaceFolder}/tests"
+            ]
+        }
+    ],
+    "compounds": []
+}
