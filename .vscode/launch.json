@@ -2,7 +2,7 @@
     "configurations": [
         {
             "name": "Launch Ore",
-            "type":"cppdbg",
+            "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceRoot}/build/Debug/Ore",
             "preLaunchTask": "Ore: Debug Build",
@@ -13,6 +13,14 @@
                 "-s",
                 "${workspaceFolder}/tests"
             ]
+        },
+        {
+            "name": "Kinc: Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "Ore",
+            "cwd": "",
+            "preLaunchTask": "Kinc: Build for Linux"
         }
     ],
     "compounds": []

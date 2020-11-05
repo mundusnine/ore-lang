@@ -129,6 +129,7 @@ typedef enum TokenType
     Token_None,
 	Token_Var,
 	Token_Const,
+    Token_Func,
     Token_Int,
 	Token_Float,
     Token_DoubleNewline,
@@ -152,6 +153,7 @@ struct ExprNode
 {
     ExprType type;
 	Token* tokens;
+    int tokens_length;
     ExprNode *next;
     ExprNode *first_parameter;
     
@@ -266,6 +268,14 @@ ParseContextAllocateNode(ParseContext *context)
     return node;
 }
 
+static Token*
+ParseContextAllocateToken(ParseContext *context)
+{
+    Token *t = ParseContextAllocateMemory(context, sizeof(Token));
+    MemorySet(t, 0, sizeof(*t));
+    return t;
+}
+
 static void
 PushParseError(ParseContext *context, Tokenizer *tokenizer, char *format, ...)
 {
@@ -326,7 +336,7 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
             token.string = buffer+i;
             token.string_length = 0;
 			int escaped = 1;
-			for(; (token.string[token.string_length] != ';' || escaped) && token.string[token.string_length];
+			for(; (token.string[token.string_length] != '=' && token.string[token.string_length] != ':' || escaped) && token.string[token.string_length];
                 ++token.string_length)
             {
                 if(escaped)
@@ -341,6 +351,7 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
                     }
                 }
             }
+            break;
 		}
 		else if(buffer[i] == 'c' && buffer[i+1] == 'o' && buffer[i+2] == 'n' && buffer[i+3] == 's' && buffer[i+4] == 't'){
 			token.type = Token_Const;
@@ -362,6 +373,7 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
                     }
                 }
             }
+            break;
 		}
         // NOTE(jsn): String Constant
         else if(buffer[i] == '"')
@@ -390,6 +402,30 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
             
             break;
         }
+        // NOTE(jsn): Int
+        // @TODO: Fix me we need to consider only numbers and only returnn a string of numbers
+        else if(CharIsDigit(buffer[i])){
+            token.type = Token_Int;
+            token.string = buffer+i;
+            token.string_length = 0;
+            int strlen = 0;
+            for(; token.string[strlen] != ';' && token.string[strlen];
+                ++strlen)
+            {
+                int isValid = CharIsDigit(token.string[strlen]) || CharIsSpace(token.string[strlen]);
+                if(!isValid)
+                {
+                    break;//We will push an error since we have an invalid value
+                }
+                else{
+                    ++token.string_length;
+                }
+            }
+            // if(token.string[token.string_length] == ';')
+            //     --token.string_length;
+            break;
+        }
+        //@TODO: Use this for functions eventually
         else if(!CharIsSpace(buffer[i]))
         {
             int j = 0;
@@ -399,12 +435,14 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
             {
                 static char *symbolic_blocks_to_break_out[] =
                 {
+                    "=",
                     "*",
                     "_",
                     "`",
                     "{",
                     "}",
                     "|",
+                    ";",
                 };
                 
                 for(j=i+1; buffer[j] && CharIsSymbol(buffer[j]); ++j);
@@ -437,12 +475,12 @@ GetNextTokenFromBuffer(Tokenizer *tokenizer)
         //         for(; i > 0 && CharIsSpace(buffer[i-1]); --i);
         //     }
             
-        //     if(j != 0)
-        //     {
-        //         token.string = buffer+i;
-        //         token.string_length = j-i;
-        //         break;
-        //     }
+            if(j != 0)
+            {
+                token.string = buffer+i;
+                token.string_length = j-i;
+                break;
+            }
         }
     }
 	
@@ -541,6 +579,64 @@ TrimQuotationMarks(char **text, int *text_length)
     }
 }
 
+static i8 
+GetValue(ParseContext *context, Tokenizer *tokenizer, char* link,Token* value){
+    int link_length = 0;
+    i8 isSet = 0;
+    int bracket_stack = 0;
+    for(int i = 0; link[i]; ++i)
+    {
+        if(link[i] == '"')
+        {
+            if(RequireTokenType(tokenizer, Token_StringConstant, value)){
+                i += value->string_length;
+                isSet = 1;
+            }
+            else{
+                PushParseError(context, tokenizer, "Expected \" to follow String assignation.");
+            }
+            break;
+        }
+        else if(link[i] == '[')
+        {
+            bracket_stack++;
+        }
+        else if(link[i] == ']')
+        {
+            --bracket_stack;
+        }
+        else if(CharIsDigit(link[i]) && RequireTokenType(tokenizer, Token_Int, value))
+        {
+            if(CharIsDigit(value->string[value->string_length-1]))
+            {
+                isSet = 1;
+            }
+            else {
+                PushParseError(context, tokenizer, "Expected Int value but had incorrect char %c.",value->string[value->string_length-1]);
+            }
+            i += value->string_length;
+        }
+        
+        if(link[i] == ';')
+        {
+            ++link_length;
+            break;
+        }
+        
+        ++link_length;
+    }
+    if(isSet == 0){
+        PushParseError(context, tokenizer, "Expected value before endline");
+    }
+    return isSet == 0 ? isSet : link_length;
+}
+static void
+setTokenFromOther(Token* to, Token from){
+    to->type = from.type;
+    to->string = from.string;
+    to->string_length = from.string_length;
+    to->lines_traversed = from.lines_traversed;
+}
 static ExprNode *
 ParseText(ParseContext *context, Tokenizer *tokenizer)
 {
@@ -553,62 +649,36 @@ ParseText(ParseContext *context, Tokenizer *tokenizer)
     
     while(token.type != Token_None)
     {
-        Token var = {0};
+        Token isVar = {0};
         Token symbol = {0};
         Token text = {0};
         
-        if(RequireTokenType(tokenizer, Token_Var, &var))
+        if(RequireTokenType(tokenizer, Token_Var, &isVar))
         {
-			Token assign = {0};
-			if(RequireToken(tokenizer, "=", &assign))
+            Token* var = ParseContextAllocateToken(context);
+            setTokenFromOther(var,isVar);
+			Token isAssign = {0};
+            tokenizer->at = var->string + var->string_length;
+			if(RequireToken(tokenizer, "=", &isAssign))
 			{
-				char *link = assign.string+1;
-				int link_length = 0;
-				Token value = {0};
-				i8 isSet = 0;
-				int bracket_stack = 0;
-				for(int i = 0; link[i]; ++i)
-				{
-					if(link[i] == '"')
-					{
-						if(RequireTokenType(tokenizer, Token_StringConstant, &value)){
-							isSet = 1;
-						}
-						else{
-							PushParseError(context, tokenizer, "Expected \" to follow String assignation.");
-						}
-						break;
-					}
-					else if(link[i] == '[')
-					{
-						bracket_stack++;
-					}
-					else if(link[i] == ']')
-					{
-						--bracket_stack;
-					}
-					
-					if(link[i] == ';')
-					{
-						break;
-					}
-					
-					++link_length;
-				}
-				if(isSet == 0){
-					PushParseError(context, tokenizer, "Expected value before endline");
-				}
-				else{
+                Token* assign = ParseContextAllocateToken(context);
+                setTokenFromOther(assign,isAssign);
+				char *link = assign->string+1;
+				Token* value = ParseContextAllocateToken(context);
+                int link_length = GetValue(context,tokenizer,link,value);
+				if(link_length){
 					ExprNode *node = ParseContextAllocateNode(context);
-					assign.tokens = &value;
-					var.tokens = &assign;
-					node->tokens = &var;
+					assign->tokens = value;
+					var->tokens = assign;
+					node->tokens = var;
+                    node->tokens_length = 3;
 					node->type = ExprType_Var;
 					*node_store_target = node;
 					node_store_target = &(*node_store_target)->next;
 					
 					tokenizer->at = link + link_length;
-				}
+                }
+				
 
 			}
             // else if(TokenMatch(tag, "@Code"))
@@ -793,10 +863,34 @@ struct ProcessedFile
     char *js_output_path;
     FILE *js_output_file;
 };
-
+static const char* GetExprType(ExprType type){
+    switch (type)
+    {
+    case ExprType_Var:
+        return "Var";
+    case ExprType_Const:
+        return "Const";
+    case ExprType_Func:
+        return "Func";
+    default:
+        return "Invalid";
+    }
+}
 static void
 OutputWASMFromPageNodeTreeToFile(ExprNode *node, FILE *file, int follow_next, ProcessedFile *files, int file_count)
 {
+    ExprNode *previous_node = 0;
+    
+    for(; node; previous_node = node, node = node->next)
+    {
+        Log("%s",GetExprType(node->type));
+        int i =0;
+        while(i <= node->tokens_length){
+            if(node->tokens[i].string_length > 0)
+                Log("%s",node->tokens[i].string);
+            i++;
+        }
+    }
 }
 static ProcessedFile
 ProcessFile(char *filename, char *file, FileProcessData *process_data, ParseContext *context)
@@ -1047,7 +1141,6 @@ void listFilesRecursively(char *basePath,char** filenames,int* file_count)
             strcpy(path, basePath);
             strcat(path, "/");
             strcat(path, dp->d_name);
-			printf("%s\n",path);
 			struct stat sb;
 			if(stat(path, &sb) == 0 && S_ISREG(sb.st_mode))
             {
@@ -1098,7 +1191,7 @@ main(int argument_count, char **arguments)
             arguments[i] = 0;
         }
         
-        // NOTE(rjf): Arguments with input data (not just flags).
+        //Arguments with input data (not just flags).
         else if(argument_count > i+1)
         {
             if(CStringMatchCaseInsensitive(arguments[i], "--source") || CStringMatchCaseInsensitive(arguments[i], "-s"))
@@ -1132,86 +1225,83 @@ main(int argument_count, char **arguments)
     }
     
     ParseContext context = {0};
-    ProcessedFile files[4096];
-	char* filenames[4096] ={0};
+    ProcessedFile files[MAX_FILE_COUNT];
+	char* filenames[MAX_FILE_COUNT] ={0};
     int file_count = 0;
 	if(source_dir_path){
 		listFilesRecursively(source_dir_path,&filenames,&file_count);
-		for(int i = 0; i < file_count; i++){
-			printf("%s",filenames[file_count]);
-		}
 	}
-    // for(int i = 0; i < file_count; i++)
-    // {
-    //     char *filename = filenames[i];
-    //     if(filename)
-    //     {
-    //         Log("Processing file \"%s\".", filename);
+    for(int i = 0; i < file_count; i++)
+    {
+        char *filename = filenames[i];
+        if(filename)
+        {
+            Log("Processing file \"%s\".", filename);
         
-    //         char extension[256] = {0};
-    //         char filename_no_extension[256] = {0};
-    //         char wasm_output_path[256] = {0};
-    //         char c_output_path[256] = {0};
-    //         char js_output_path[256] = {0};
+            char extension[256] = {0};
+            char filename_no_extension[256] = {0};
+            char wasm_output_path[256] = {0};
+            char c_output_path[256] = {0};
+            char js_output_path[256] = {0};
             
-    //         snprintf(filename_no_extension, sizeof(filename_no_extension), "%s", filename);
-    //         char *last_period = filename_no_extension;
-    //         for(int i = 0; filename_no_extension[i]; ++i)
-    //         {
-    //             if(filename_no_extension[i] == '.')
-    //             {
-    //                 last_period = filename_no_extension+i;
-    //             }
-    //         }
-    //         *last_period = 0;
+            snprintf(filename_no_extension, sizeof(filename_no_extension), "%s", filename);
+            char *last_period = filename_no_extension;
+            for(int i = 0; filename_no_extension[i]; ++i)
+            {
+                if(filename_no_extension[i] == '.')
+                {
+                    last_period = filename_no_extension+i;
+                }
+            }
+            *last_period = 0;
             
-    //         snprintf(wasm_output_path, sizeof(wasm_output_path), "generated/%s.wasm", filename_no_extension);
-    //         snprintf(c_output_path, sizeof(c_output_path), "generated/%s.md", filename_no_extension);
-    //         snprintf(js_output_path, sizeof(js_output_path), "generated/%s.bbcode", filename_no_extension);
+            snprintf(wasm_output_path, sizeof(wasm_output_path), "%s.wasm", filename_no_extension);
+            snprintf(c_output_path, sizeof(c_output_path), "%s.c", filename_no_extension);
+            snprintf(js_output_path, sizeof(js_output_path), "%s.js", filename_no_extension);
             
-    //         snprintf(extension, sizeof(extension), "%s", last_period+1);
-    //         InputType input_type = InputType_Invalid;
-    //         if(CStringMatchCaseInsensitive(extension, "or"))
-    //         {
-    //             input_type = InputType_OR;
-    //         }
-	// 		else if(CStringMatchCaseInsensitive(extension, "wasm")){
-	// 			input_type = InputType_WASM;
-	// 		}
+            snprintf(extension, sizeof(extension), "%s", last_period+1);
+            InputType input_type = InputType_Invalid;
+            if(CStringMatchCaseInsensitive(extension, "or"))
+            {
+                input_type = InputType_OR;
+            }
+			else if(CStringMatchCaseInsensitive(extension, "wasm")){
+				input_type = InputType_WASM;
+			}
             
-    //         FileProcessData process_data = {0};
-    //         {
-    //             process_data.input_type = input_type;
-    //             process_data.output_flags = output_flags;
-    //             process_data.filename_no_extension = filename_no_extension;
-    //             process_data.wasm_output_path = wasm_output_path;
-    //             process_data.c_output_path = c_output_path;
-    //             process_data.js_output_path = js_output_path;
-    //         }
+            FileProcessData process_data = {0};
+            {
+                process_data.input_type = input_type;
+                process_data.output_flags = output_flags;
+                process_data.filename_no_extension = filename_no_extension;
+                process_data.wasm_output_path = wasm_output_path;
+                process_data.c_output_path = c_output_path;
+                process_data.js_output_path = js_output_path;
+            }
             
-    //         ProcessedFile processed_file = {0};
-	// 		if(input_type != InputType_Invalid){
-	// 			char *file = LoadEntireFileAndNullTerminate(filename);
-	// 			processed_file = ProcessFile(filename, file, &process_data, &context);
-	// 		}
-	// 		else
-    //         {
-    //             fprintf(stderr, "ERROR: input file %s.%s is not a valid file type; Only .wasm and .or are supported\n",filename,extension);
-	// 			continue;
-    //         }
+            ProcessedFile processed_file = {0};
+			if(input_type != InputType_Invalid){
+				char *file = LoadEntireFileAndNullTerminate(filename);
+				processed_file = ProcessFile(filename, file, &process_data, &context);
+			}
+			else
+            {
+                fprintf(stderr, "ERROR: input file %s.%s is not a valid file type; Only .wasm and .or are supported\n",filename,extension);
+				continue;
+            }
             
-    //         if(file_count < sizeof(files)/sizeof(files[0]))
-    //         {
-    //             files[file_count++] = processed_file;
-    //         }
-    //         else
-    //         {
-    //             fprintf(stderr, "ERROR: Max file count reached. @John, increase this.\n");
-    //         }
-    //     }
-    // }
+            if(file_count < sizeof(files)/sizeof(files[0]))
+            {
+                files[file_count++] = processed_file;
+            }
+            else
+            {
+                fprintf(stderr, "ERROR: Max file count reached. @John, increase this.\n");
+            }
+        }
+    }
     
-    // NOTE(rjf): Print errors.
+    // Print errors.
     if(context.error_stack_size > 0)
     {
         for(int i = 0; i < context.error_stack_size; ++i)

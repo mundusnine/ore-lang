@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "*.tcc": "c",
+        "deque": "c",
+        "string": "c",
+        "vector": "c",
+        "system_error": "c",
+        "array": "c"
+    }
+}
